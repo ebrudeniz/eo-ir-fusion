@@ -1,0 +1,17 @@
+{
+  "seed": 42,
+  "val_ratio_target": 0.15,
+  "val_clips": [
+    "05",
+    "06",
+    "14",
+    "15"
+  ],
+  "n_train": 9921,
+  "n_val": 2104,
+  "n_test": 3463,
+  "empty_label_stems": [
+    "100030",
+    "100033"
+  ]
+}

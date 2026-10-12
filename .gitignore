@@ -1,0 +1,22 @@
+# Veri seti: LLVIP lisansı yeniden dağıtıma uygun değil ve boyutu GB'larca
+LLVIP/
+LLVIP.zip
+output/
+output_v2/
+dataset_*/
+*.zip
+
+# Eğitim çıktıları ve ağırlıklar (ağırlıklar sonra GitHub Releases'e eklenebilir)
+runs/
+weights/
+*.pt
+*.cache
+
+# Doğrulama betiğinin ürettiği geçici görüntüler
+_verify_*.jpg
+
+# Python / Jupyter
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+.venv/

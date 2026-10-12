@@ -1,0 +1,10 @@
+# Şablon: path satırını kendi makinendeki MUTLAK yola göre düzenle.
+# (prepare_llvip_yolo.py'nin --out_root klasörünün içindeki dataset_ir)
+# Colab defteri bu dosyayı kendisi üretir, elle düzenlemene gerek yok.
+path: /YOL/output_v2/dataset_ir
+train: images/train
+val: images/val
+test: images/test
+
+names:
+  0: person
