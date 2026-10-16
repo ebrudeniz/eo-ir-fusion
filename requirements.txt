@@ -1,3 +1,9 @@
 ultralytics==8.4.131
 opencv-python
 pyyaml
+numpy
+pillow
+# Fuzyon referansi (Weighted Boxes Fusion); numba ve pandas'i da kurar
+ensemble-boxes==1.0.9
+# Testler
+pytest
