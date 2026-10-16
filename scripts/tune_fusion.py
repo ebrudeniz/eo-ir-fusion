@@ -15,6 +15,9 @@ karelerde hem ogrenilip hem olculurse skor iyimser cikar. Bu yuzden:
     da bu). Yalnizca bu olcute gore secim yapilir.
   - Secilen ayar tum val'de yeniden ogrenilir ve fusion_config.json'a
     dondurulur. Test'te yalnizca bu dosya kullanilir.
+  - Karsilastirma noktasi "en iyi tek sensor": IR ve EO, ayni son NMS
+    secenekleriyle (fuzyona verilen ayar sansi baseline'a da verilir).
+    Ayni olcutle secilir ve single_config.json'a dondurulur.
 
 Dikkat: onlarca ayar arasindan en iyisini secmek OOF skorunu da hafif
 iyimser yapar (secim yanliligi). Durust sayi test'ten gelir; burada
@@ -40,10 +43,12 @@ ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from eoir.dets import check_same_images, clip_of, load_dets, load_gt  # noqa: E402
 from eoir.fusion import (BOX_RULES, SCORE_RULES, Calibrator, FusionModel,  # noqa: E402
-                         calibration_data, expected_calibration_error, wbf_reference)
+                         calibration_data, expected_calibration_error, single_sensor_nms,
+                         wbf_reference)
 from eoir.metrics import image_stats, summarize  # noqa: E402
 
 MATCH_IOUS = (0.3, 0.5, 0.7)
+FINAL_NMS = (None, 0.55)
 WBF_IOUS = (0.4, 0.55, 0.7)
 PRIMARY = "map50_95"
 
@@ -93,12 +98,17 @@ def main():
 
     rows, results = [], {}
 
-    # Baseline'lar: ogrenilen parca yok, dogrudan olculur.
-    for name, d in (("eo_only", eo), ("ir_only", ir)):
-        res = scores(image_stats(gt, d), clips)
+    # Baseline'lar: ogrenilen parca yok, dogrudan olculur. Son NMS secenekleri de denenir.
+    single_rows = []
+    for (mod, d), fn in itertools.product((("eo", eo), ("ir", ir)), FINAL_NMS):
+        name = f"{mod}_only" + ("" if fn is None else f"_nms{fn}")
+        res = scores(image_stats(gt, single_sensor_nms(d, fn)), clips)
         results[name] = res
-        rows.append(row_of(name, {}, res, clips))
-        print(f"  {name:10s} mAP50 {res['overall']['map50']:.4f}  mAP50-95 {res['overall']['map50_95']:.4f}")
+        row = row_of(name, {"modality": mod, "final_nms": fn}, res, clips)
+        rows.append(row)
+        single_rows.append(row)
+        print(f"  {name:18s} mAP50 {res['overall']['map50']:.4f}  mAP50-95 {res['overall']['map50_95']:.4f}")
+    best_single = max(single_rows, key=lambda r: r[PRIMARY])
 
     # Fold basina kalibrasyon (tum fuzyon ayarlari ayni fold kalibrasyonunu paylasir).
     fold_cal, calib_report = {}, {}
@@ -125,7 +135,7 @@ def main():
     # Fuzyon izgarasi. Eslestirme (pahali kisim) yalnizca fold kalibrasyonuna ve
     # match_iou'ya bagli; her (fold, match_iou) icin bir kez kurulup tum skor ve
     # kutu kurallarinda yeniden kullanilir. Sonuc degismez, yalnizca hizlanir.
-    grid = list(itertools.product(MATCH_IOUS, SCORE_RULES, BOX_RULES))
+    grid = list(itertools.product(MATCH_IOUS, SCORE_RULES, BOX_RULES, FINAL_NMS))
     print(f"\n{len(grid)} fuzyon ayari x {len(clips)} fold")
     k = 0
     for miou in MATCH_IOUS:
@@ -134,15 +144,16 @@ def main():
             builder = FusionModel(match_iou=miou)
             builder.cal_eo, builder.cal_ir = fold_cal[c]
             cache[c] = {s: builder.clusters(eo[s], ir[s]) for s in stems}
-        for srule, brule in itertools.product(SCORE_RULES, BOX_RULES):
+        for srule, brule, fn in itertools.product(SCORE_RULES, BOX_RULES, FINAL_NMS):
             k += 1
-            cfg = {"match_iou": miou, "score_rule": srule, "box_rule": brule, "calibration": "platt"}
+            cfg = {"match_iou": miou, "score_rule": srule, "box_rule": brule, "calibration": "platt",
+                   "final_nms": fn}
             fused = {}
             for c, (tr, te) in folds.items():
                 m = FusionModel(**cfg).fit(gt, eo, ir, tr, calibrators=fold_cal[c], clusters=cache[c])
                 fused.update(m.fuse(eo, ir, te, clusters=cache[c]))
             res = scores(image_stats(gt, fused), clips)
-            name = f"fusion_{srule}_{brule}_m{miou}"
+            name = f"fusion_{srule}_{brule}_m{miou}" + ("" if fn is None else f"_nms{fn}")
             results[name] = res
             rows.append(row_of(name, cfg, res, clips))
             print(f"  [{k:2d}/{len(grid)}] {name:34s} mAP50 {res['overall']['map50']:.4f}  "
@@ -151,7 +162,7 @@ def main():
 
     fusion_rows = [r for r in rows if r["method"].startswith("fusion_")]
     best = max(fusion_rows, key=lambda r: r[PRIMARY])
-    best_cfg = {k: best[k] for k in ("match_iou", "score_rule", "box_rule", "calibration")}
+    best_cfg = {k: best[k] for k in ("match_iou", "score_rule", "box_rule", "calibration", "final_nms")}
 
     # Ablasyon: ayni ayar, kalibrasyonsuz (kalibrasyonun katkisi).
     abl_cfg = {**best_cfg, "calibration": "none"}
@@ -178,9 +189,9 @@ def main():
         wbf_rows = [r for r in rows if r["method"].startswith("wbf_")]
         wbf_best = max(wbf_rows, key=lambda r: r[PRIMARY])
 
-    # Kararlilik: en iyi ayar her klipte IR'a gore ne yapiyor?
-    ir_res, best_res = results["ir_only"], results[best["method"]]
-    per_clip_delta = {c: best_res[c][PRIMARY] - ir_res[c][PRIMARY] for c in clips}
+    # Kararlilik: en iyi ayar her klipte en iyi tek sensore gore ne yapiyor?
+    ref_res, best_res = results[best_single["method"]], results[best["method"]]
+    per_clip_delta = {c: best_res[c][PRIMARY] - ref_res[c][PRIMARY] for c in clips}
 
     # Son model: secilen ayar TUM val'de ogrenilir ve dondurulur.
     final = FusionModel(**best_cfg).fit(gt, eo, ir, stems)
@@ -195,6 +206,10 @@ def main():
         wbf_frozen = {"method": "wbf", "iou_thr": wbf_best["wbf_iou_thr"], "skip_box_thr": 0.0,
                       "max_det": 300, "selected_by": f"val {PRIMARY}", "inputs": inputs}
         (args.out_dir / "wbf_config.json").write_text(json.dumps(wbf_frozen, indent=2), encoding="utf-8")
+    single_frozen = {"method": "single_nms", "modality": best_single["modality"],
+                     "final_nms": best_single["final_nms"], "max_det": 300,
+                     "selected_by": f"val {PRIMARY}", "inputs": inputs}
+    (args.out_dir / "single_config.json").write_text(json.dumps(single_frozen, indent=2), encoding="utf-8")
 
     keys = sorted({k for r in rows for k in r}, key=lambda k: (k != "method", k))
     with open(args.out_dir / "cv_results.csv", "w", newline="", encoding="utf-8") as f:
@@ -204,11 +219,13 @@ def main():
 
     summary = {
         "primary_metric": f"OOF {PRIMARY}", "clips": clips, "n_configs": len(grid),
-        "baselines": {n: results[n]["overall"] for n in ("eo_only", "ir_only")},
+        "baselines": {r["method"]: results[r["method"]]["overall"] for r in single_rows},
+        "best_single": best_single["method"],
         "best_fusion": {"name": best["method"], "config": best_cfg, "oof": best_res["overall"]},
-        "best_minus_ir_overall": {k: best_res["overall"][k] - ir_res["overall"][k] for k in ("map50", "map50_95")},
-        "best_minus_ir_per_clip_map50_95": per_clip_delta,
-        "clips_where_best_beats_ir": int(sum(v > 0 for v in per_clip_delta.values())),
+        "best_minus_single_overall": {k: best_res["overall"][k] - ref_res["overall"][k]
+                                      for k in ("map50", "map50_95")},
+        "best_minus_single_per_clip_map50_95": per_clip_delta,
+        "clips_where_best_beats_single": int(sum(v > 0 for v in per_clip_delta.values())),
         "wbf_best": None if wbf_best is None else {"name": wbf_best["method"], "map50": wbf_best["map50"],
                                                    "map50_95": wbf_best["map50_95"]},
         "calibration": calib_report, "runtime_s": round(time.time() - t0, 1),
@@ -216,11 +233,17 @@ def main():
     (args.out_dir / "summary.json").write_text(json.dumps(summary, indent=2), encoding="utf-8")
     plot_reliability(calib_report, args.out_dir / "reliability.png")
 
-    d = summary["best_minus_ir_overall"]
-    print(f"\nEn iyi fuzyon: {best['method']}  OOF mAP50 {best['map50']:.4f}  mAP50-95 {best['map50_95']:.4f}")
-    print(f"IR'a gore fark: mAP50 {d['map50']:+.4f}  mAP50-95 {d['map50_95']:+.4f}  "
-          f"(klip bazinda IR'i gectigi klip: {summary['clips_where_best_beats_ir']}/{len(clips)})")
-    print(f"Yazildi: {args.out_dir}/fusion_config.json, cv_results.csv, summary.json")
+    d = summary["best_minus_single_overall"]
+    print(f"\nEn iyi tek sensor: {best_single['method']}  mAP50 {best_single['map50']:.4f}  "
+          f"mAP50-95 {best_single['map50_95']:.4f}")
+    print(f"En iyi fuzyon: {best['method']}  OOF mAP50 {best['map50']:.4f}  mAP50-95 {best['map50_95']:.4f}")
+    if wbf_best is not None:
+        print(f"WBF referansi: {wbf_best['method']}  mAP50 {wbf_best['map50']:.4f}  "
+              f"mAP50-95 {wbf_best['map50_95']:.4f}")
+    print(f"Fuzyon - en iyi tek sensor: mAP50 {d['map50']:+.4f}  mAP50-95 {d['map50_95']:+.4f}  "
+          f"(gectigi klip: {summary['clips_where_best_beats_single']}/{len(clips)})")
+    print(f"Yazildi: {args.out_dir}/ fusion_config.json, single_config.json, wbf_config.json, "
+          f"cv_results.csv, summary.json")
 
 
 def plot_reliability(calib_report, path):

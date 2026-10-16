@@ -2,8 +2,8 @@
 Dondurulmus fuzyonu uygulama
 ============================
 
-tune_fusion.py'nin yazdigi fusion_config.json (ya da wbf_config.json)
-ile EO ve IR tespitlerini birlestirip predict_raw bicimindeki bir dosyaya
+tune_fusion.py'nin yazdigi fusion_config.json (ya da wbf_config.json,
+single_config.json) ile EO ve IR tespitlerini birlestirip predict_raw bicimindeki bir dosyaya
 yazar. Hicbir sey ogrenmez ve metrik hesaplamaz, yani test tespitlerine
 guvenle uygulanabilir. Olcum evaluate_dets.py ile yapilir.
 
@@ -21,7 +21,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 from eoir.dets import load_dets, save_dets  # noqa: E402
-from eoir.fusion import FusionModel, wbf_reference  # noqa: E402
+from eoir.fusion import FusionModel, single_sensor_nms, wbf_reference  # noqa: E402
 
 
 def main():
@@ -50,6 +50,10 @@ def main():
         fused = wbf_reference(eo, ir, wh, iou_thr=cfg["iou_thr"], skip_box_thr=cfg["skip_box_thr"],
                               max_det=cfg["max_det"])
         desc = {"iou_thr": cfg["iou_thr"]}
+    elif cfg["method"] == "single_nms":
+        # Karsilastirma noktasi: tek sensor + val'de secilen son NMS
+        fused = single_sensor_nms(eo if cfg["modality"] == "eo" else ir, cfg["final_nms"], cfg["max_det"])
+        desc = {"modality": cfg["modality"], "final_nms": cfg["final_nms"]}
     else:
         raise SystemExit(f"Bilinmeyen yontem: {cfg['method']}")
 

@@ -13,7 +13,12 @@ Akis (her goruntu icin):
      acgozlu bire bir eslenir. Her kume en fazla 1 EO + 1 IR kutusu tasir.
      Eslesmeyen kutu tek sensorlu kume olarak kalir.
   3) Skor kurali ve kutu kurali kumeyi tek tespite cevirir.
-  4) Goruntu basina en fazla max_det (300) tespit: baseline'lar da Ultralytics'te
+  4) Istege bagli son NMS (final_nms): bire bir eslestirme ayni sensordeki kopya
+     kutulari (NMS 0,7'den kurtulmus, IoU < 0,7) ayri tespit olarak birakir ve
+     bunlar yanlis alarm sayilir. WBF bunlari ayni kumeye katarak yutar. Adil
+     olsun diye ayni NMS baseline'lara da uygulanir (single_sensor_nms), yoksa
+     kazancin fuzyondan mi NMS ayarindan mi geldigi ayrilamaz.
+  5) Goruntu basina en fazla max_det (300) tespit: baseline'lar da Ultralytics'te
      300 ile sinirli, fuzyon 600'e kadar kutu birakirsa karsilastirma adil olmaz.
 
 Skor kurallari (p_eo, p_ir kalibre olasilik; eksik sensor = 0):
@@ -168,6 +173,30 @@ def _gather(arr, idx, fill):
     return out
 
 
+def nms(boxes: np.ndarray, scores: np.ndarray, iou_thr: float) -> np.ndarray:
+    """Klasik acgozlu NMS; tutulan indeksleri skor sirasiyla dondurur."""
+    order = np.argsort(-scores, kind="stable")
+    if len(order) == 0:
+        return order
+    iou = box_iou(boxes[order], boxes[order])
+    keep = np.ones(len(order), dtype=bool)
+    for a in range(len(order)):
+        if keep[a]:
+            keep[a + 1:] &= iou[a, a + 1:] < iou_thr
+    return order[keep]
+
+
+def single_sensor_nms(dets: dict, iou_thr, max_det: int = 300) -> dict:
+    """Baseline'in ayni son NMS ile hali (iou_thr=None ise oldugu gibi)."""
+    if iou_thr is None:
+        return dets
+    out = {}
+    for stem, (b, s) in dets.items():
+        k = nms(b, s, iou_thr)[:max_det]
+        out[stem] = (b[k], s[k])
+    return out
+
+
 def build_clusters(eo, ir, cal_eo, cal_ir, match_iou):
     """Bir goruntu icin kume tablosu (sozluk). eo/ir: (boxes, scores)."""
     b_eo, s_eo = eo
@@ -214,11 +243,12 @@ def learned_features(c, boxes) -> np.ndarray:
 
 class FusionModel:
     def __init__(self, match_iou=0.5, score_rule="max", box_rule="ir", calibration="platt",
-                 max_det=300):
+                 final_nms=None, max_det=300):
         if score_rule not in SCORE_RULES or box_rule not in BOX_RULES:
             raise ValueError((score_rule, box_rule))
         self.cfg = {"match_iou": float(match_iou), "score_rule": score_rule, "box_rule": box_rule,
-                    "calibration": calibration, "max_det": int(max_det)}
+                    "calibration": calibration,
+                    "final_nms": None if final_nms is None else float(final_nms), "max_det": int(max_det)}
         self.cal_eo = Calibrator(calibration)
         self.cal_ir = Calibrator(calibration)
         self.learned = None  # {"w":..., "mu":..., "sd":...}
@@ -274,7 +304,10 @@ class FusionModel:
             L = self.learned
             score = logistic_predict(L["w"], (learned_features(c, boxes) - L["mu"]) / L["sd"])
         boxes, score = boxes[keep], score[keep]
-        top = np.argsort(-score, kind="stable")[: cfg["max_det"]]
+        if cfg["final_nms"] is not None:
+            top = nms(boxes, score, cfg["final_nms"])[: cfg["max_det"]]
+        else:
+            top = np.argsort(-score, kind="stable")[: cfg["max_det"]]
         return boxes[top], score[top]
 
     def fuse(self, eo: dict, ir: dict, stems=None, clusters=None) -> dict:
@@ -306,6 +339,8 @@ def wbf_reference(eo: dict, ir: dict, image_wh, iou_thr=0.55, skip_box_thr=0.0, 
     (Solovyev ve ark. 2021), ham skorlarla ve esit agirlikla, kendi
     uygulamamizdan bagimsiz olsun diye paket kullaniliyor.
     """
+    import warnings
+
     from ensemble_boxes import weighted_boxes_fusion
 
     W, H = image_wh
@@ -320,7 +355,9 @@ def wbf_reference(eo: dict, ir: dict, image_wh, iou_thr=0.55, skip_box_thr=0.0, 
         if not any(len(s) for s in sl):
             out[stem] = (np.zeros((0, 4)), np.zeros(0))
             continue
-        boxes, scores, _ = weighted_boxes_fusion(bl, sl, ll, iou_thr=iou_thr, skip_box_thr=skip_box_thr)
+        with warnings.catch_warnings():  # kenara kirpilip alani 0 kalan kutular icin uyari
+            warnings.simplefilter("ignore", UserWarning)
+            boxes, scores, _ = weighted_boxes_fusion(bl, sl, ll, iou_thr=iou_thr, skip_box_thr=skip_box_thr)
         top = np.argsort(-scores, kind="stable")[:max_det]
         out[stem] = (boxes[top] * scale, scores[top])
     return out

@@ -117,6 +117,10 @@ def write_world(tmp_path, gt, eo, ir, split="val"):
         (ds / "labels" / split / f"{stem}.txt").write_text("\n".join(lines))
         gt[stem] = g
     for name, d in (("eo", eo), ("ir", ir)):
+        # Ultralytics predict kutulari goruntu sinirina kirpar; sentetik tespitler de oyle olmali.
+        # (Kirpilmazsa sinira tasan kutular kirpilmis etikete gore yanlis alarm sayilir ve
+        # kendi kirpan WBF yapay bir ustunluk kazanir.)
+        d = {s: (np.clip(b, 0, [W, H, W, H]), sc) for s, (b, sc) in d.items()}
         save_dets(tmp_path / f"{name}_{split}.json.gz", d,
                   {"modality": name, "split": split, "image_wh": [W, H]})
     return ds
@@ -140,7 +144,8 @@ def test_end_to_end_cli(tmp_path):
             "--ir", tmp_path / "ir_val.json.gz", "--out_dir", out)
     assert r.returncode == 0, r.stderr
     summary = json.loads((out / "summary.json").read_text())
-    assert summary["best_minus_ir_overall"]["map50"] > 0
+    assert summary["best_minus_single_overall"]["map50"] > 0
+    assert (out / "single_config.json").exists()
     assert (out / "fusion_config.json").exists() and (out / "wbf_config.json").exists()
 
     r = run(ROOT / "scripts/apply_fusion.py", "--config", out / "fusion_config.json",
@@ -155,3 +160,16 @@ def test_end_to_end_cli(tmp_path):
     r = run(ROOT / "scripts/evaluate_dets.py", "--dataset_dir", tmp_path / "t" / "dataset_ir", "--split", "test",
             "--dets", f"ir={tmp_path / 't' / 'ir_test.json.gz'}")
     assert r.returncode != 0 and "--final" in (r.stderr + r.stdout)
+
+
+def test_final_nms_removes_same_sensor_duplicates():
+    """Ayni sensordeki kopya kutu (IoU 0,6) son NMS 0,55 ile elenmeli, 0,7 NMS'ten kurtulmus olsa da."""
+    from eoir.metrics import box_iou
+
+    b = np.array([[0, 0, 100, 200], [0, 50, 100, 250]], dtype=float)  # IoU = 150/250 = 0,6
+    assert box_iou(b[:1], b[1:])[0, 0] == pytest.approx(0.6, abs=1e-6)
+    eo = (b, np.array([0.8, 0.3]))
+    ir = (b[:1] + 1, np.array([0.9]))
+    plain = FusionModel(score_rule="max", calibration="none").fuse_image(eo, ir)
+    with_nms = FusionModel(score_rule="max", calibration="none", final_nms=0.55).fuse_image(eo, ir)
+    assert len(plain[0]) == 2 and len(with_nms[0]) == 1

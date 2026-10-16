@@ -83,9 +83,10 @@ Füzyonun ne kadar kazandırdığını ölçmeden önce ölçüm aletinin kendis
    - *Eşleştirme:* EO ve IR kutuları IoU ile bire bir eşlenir, güçlü kutular önce. Eşleşmeyen kutu tek sensörlü tespit olarak kalır.
    - *Skor kuralı:* `max` (birleşim), `mean`, `noisy_or` (bağımsız hata varsayımı), `intersection` (iki sensör de görmeli) ya da `learned` (lojistik regresyon: iki skor, hangi sensörün gördüğü, IoU, kutu alanı).
    - *Kutu kuralı:* `ir`, `score` ya da `weighted`. IR kutuları zaten daha sıkı olduğu için ortalama almanın mAP50-95'i düşürüp düşürmediği ayrıca ölçülür.
+   - *Son NMS (isteğe bağlı):* bire bir eşleştirme, aynı sensörden NMS 0,7'yi geçmiş kopya kutuları ayrı tespit olarak bırakır ve bunlar yanlış alarm sayılır. WBF bu kopyaları aynı kümeye katarak yutar. Gerekip gerekmediğine val karar verir. Aynı seçenek baseline'lara da verilir. Aksi halde kazancın füzyondan mı yoksa NMS ayarından mı geldiği ayrılamaz.
    - Görüntü başına en fazla 300 tespit, baseline'larla adil karşılaştırma için.
    - *Referans:* literatürdeki Weighted Boxes Fusion, bağımsız olsun diye `ensemble-boxes` paketinden.
-5. **Ayar seçimi** (`tune_fusion.py`): val iki kez kullanıldığı için (epoch seçimi ve füzyon ayarı) 4 val klibiyle bir-klip-dışarıda çapraz doğrulama yapılır. Öğrenilen parçalar 3 klipte öğrenilir, dışarıdaki klipte ölçülür. Birincil ölçüt önceden seçildi: out-of-fold mAP50-95. Seçilen ayar tüm val'de yeniden öğrenilip `fusion_config.json` olarak dondurulur. Ayrıca en iyi ayarın IR'ı kaç klipte geçtiği ve kalibrasyonun güvenilirlik diyagramı raporlanır.
+5. **Ayar seçimi** (`tune_fusion.py`, 90 füzyon ayarı, gerçek ölçekli sentetik veride CPU'da yaklaşık 35 dakika): val iki kez kullanıldığı için (epoch seçimi ve füzyon ayarı) 4 val klibiyle bir-klip-dışarıda çapraz doğrulama yapılır. Öğrenilen parçalar 3 klipte öğrenilir, dışarıdaki klipte ölçülür. Birincil ölçüt önceden seçildi: out-of-fold mAP50-95. Seçilen ayar tüm val'de yeniden öğrenilip `fusion_config.json` olarak dondurulur. Karşılaştırma noktası "en iyi tek sensör"dür: IR ve EO, aynı son NMS seçenekleriyle ve aynı ölçütle seçilir (`single_config.json`). Ayrıca en iyi ayarın IR'ı kaç klipte geçtiği ve kalibrasyonun güvenilirlik diyagramı raporlanır.
 6. **Uygulama** (`apply_fusion.py`): dondurulmuş ayarı tespit dosyalarına uygular. Hiçbir şey öğrenmez.
 
 ## Nasıl çalıştırılır
@@ -126,8 +127,9 @@ python3 scripts/tune_fusion.py --dataset_dir /yol/dataset_ir --eo dets/eo_val.js
 
 # Yalnızca her şey dondurulduktan sonra, tek sefer
 python3 scripts/apply_fusion.py --config results/fusion_val/fusion_config.json --eo dets/eo_test.json.gz --ir dets/ir_test.json.gz --out dets/fusion_test.json.gz
+python3 scripts/apply_fusion.py --config results/fusion_val/single_config.json --eo dets/eo_test.json.gz --ir dets/ir_test.json.gz --out dets/single_test.json.gz
 python3 scripts/evaluate_dets.py --dataset_dir /yol/dataset_ir --split test --final \
-    --dets ir=dets/ir_test.json.gz eo=dets/eo_test.json.gz fusion=dets/fusion_test.json.gz --per_clip --bootstrap 1000 --reference ir
+    --dets ir=dets/ir_test.json.gz eo=dets/eo_test.json.gz single=dets/single_test.json.gz fusion=dets/fusion_test.json.gz --per_clip --bootstrap 1000 --reference single
 ```
 
 `configs/` altındaki YAML'lar şablon, Colab defteri kendi yolunu üretir.
